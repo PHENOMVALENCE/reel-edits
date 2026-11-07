@@ -19,6 +19,7 @@ Open <http://localhost:3000>. Use `npm run build` to check the production build 
 
 - [Research and decisions](docs/research.md) covers video tooling, reference links, AI APIs, compute, and costs.
 - [Pipeline architecture](docs/architecture.md) defines the asset, style, timeline, and render boundaries.
+- [Effects and transitions catalog](docs/effects.md) lists the allowed transitions, effects, captions and pacing rules.
 - [Implementation roadmap](docs/roadmap.md) lists the proposed pull requests and acceptance gates.
 - [Licensing and media policy](docs/licensing.md) explains the scope of the MIT license, dependency obligations, and media handling.
 
