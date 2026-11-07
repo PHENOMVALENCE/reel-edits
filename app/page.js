@@ -1,9 +1,13 @@
+'use client';
+
+import dynamic from 'next/dynamic';
+
+// Video work happens entirely in the browser, so the editor never renders on the server.
+const ReelMaker = dynamic(() => import('../components/ReelMaker.jsx'), {
+  ssr: false,
+  loading: () => <p className="busy">Loading the editor…</p>,
+});
+
 export default function Home() {
-  return (
-    <main>
-      <h1>Reel Edits</h1>
-      <p>Turn short clips and photos into polished vertical reels.</p>
-      <p>The editing and export workflow is planned. This is the project starter.</p>
-    </main>
-  );
+  return <ReelMaker />;
 }
