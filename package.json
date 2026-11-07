@@ -1,0 +1,24 @@
+{
+  "name": "reel-edits",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Next.js pipeline for editing short clips and photos into polished vertical reels.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PHENOMVALENCE/reel-edits.git"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "16.4.5",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}
