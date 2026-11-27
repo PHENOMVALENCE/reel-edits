@@ -1,16 +1,34 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Player } from '@remotion/player';
 import { Reel, REEL_ID } from '../reel/Reel.js';
-import { FPS, WIDTH, HEIGHT, MIN_SECONDS, MAX_SECONDS, TRANSITIONS, EFFECTS } from '../lib/catalog.js';
+import { FPS, WIDTH, HEIGHT, MIN_SECONDS, MAX_SECONDS, TRANSITIONS, EFFECTS, CAPTION_STYLES } from '../lib/catalog.js';
 import { PRESETS, PRESET_IDS } from '../lib/presets.js';
-import { planReel, normalizeShots, reconcile, buildTimeline } from '../lib/planner.js';
+import { normalizeShots, reconcile, buildTimeline } from '../lib/planner.js';
 import { buildPrompt, parsePlan } from '../lib/aiPlan.js';
 import { analyzeMusicFile } from '../lib/beats.js';
-import { probeFile, contactSheet } from '../lib/media.js';
+import { probeFile, contactSheet, sampleFrames } from '../lib/media.js';
+import { extractSpeechAudio } from '../lib/audioExtract.js';
+import { createApi } from '../lib/apiClient.js';
+import { STAGES, newProjectContext, runPipeline, finishTimeline, regenerateSection } from '../lib/pipeline.js';
+import { sectionsOf } from '../lib/editorial.js';
+import { checkRenderedDuration } from '../lib/qc.js';
+import AiPanel from './AiPanel.jsx';
 
 const secs = (frames) => (frames / FPS).toFixed(1);
+const SETTINGS_KEY = 'reel-edits:ai-settings';
+const DEFAULT_SETTINGS = { useClaude: true, model: '', review: true, transcription: null, accessToken: '' };
+
+function videoDuration(url) {
+  return new Promise((resolve) => {
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.onloadedmetadata = () => resolve(v.duration);
+    v.onerror = () => resolve(NaN);
+    v.src = url;
+  });
+}
 
 export default function ReelMaker() {
   const [assets, setAssets] = useState([]);
@@ -27,6 +45,50 @@ export default function ReelMaker() {
   const [render, setRender] = useState({ status: 'idle' });
   const counters = useRef({ C: 0, P: 0 });
   const abort = useRef(null);
+  const fileStore = useRef(new Map());
+  const [projectId] = useState(() => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now())));
+  const context = useRef(null);
+  if (!context.current) context.current = newProjectContext(projectId);
+  const [settings, setSettingsState] = useState(DEFAULT_SETTINGS);
+  const settingsRef = useRef(settings);
+  const [status, setStatus] = useState(null);
+  const [usage, setUsage] = useState(null);
+  const [stages, setStages] = useState({});
+  const [revision, setRevision] = useState('');
+  const [sectionAsk, setSectionAsk] = useState({});
+
+  const api = useMemo(() => createApi({ getAccessToken: () => settingsRef.current.accessToken }), []);
+  const setSettings = (next) => {
+    settingsRef.current = next;
+    setSettingsState(next);
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)); } catch { /* private mode */ }
+  };
+  const refreshUsage = useCallback(() => api.usage(projectId).then(setUsage).catch(() => {}), [api, projectId]);
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null');
+      if (saved) {
+        settingsRef.current = { ...DEFAULT_SETTINGS, ...saved };
+        setSettingsState(settingsRef.current);
+      }
+    } catch { /* ignore */ }
+    api.status(false)
+      .then((st) => { setStatus(st); if (st.configured) refreshUsage(); })
+      .catch(() => setStatus({ state: 'not_configured', configured: false }));
+  }, [api, refreshUsage]);
+
+  const claudeOn = Boolean(status?.configured && settings.useClaude && !status?.openApiBlocked);
+  const transcriptionOn = settings.transcription && settings.transcription !== 'none' ? settings.transcription : null;
+  const markStage = (id, st, note) => setStages((prev) => ({ ...prev, [id]: { status: st, note } }));
+  const pipelineOpts = (extra = {}) => ({
+    assets, music, brief, presetId, targetSeconds: target, title, endText,
+    model: settings.model || undefined, projectId, context: context.current, api, review: settings.review,
+    ai: { claude: claudeOn, transcription: transcriptionOn },
+    deps: { sampleFrames, extractAudio: (id) => extractSpeechAudio(fileStore.current.get(id)) },
+    onStage: markStage,
+    ...extra,
+  });
 
   const assetMap = useMemo(() => Object.fromEntries(assets.map((a) => [a.id, a])), [assets]);
   const inputProps = useMemo(() => ({ timeline, assets: assetMap, music: music ? { url: music.url } : null }), [timeline, assetMap, music]);
@@ -43,6 +105,7 @@ export default function ReelMaker() {
       const id = `${prefix}${++counters.current[prefix]}`;
       try {
         added.push(await probeFile(file, id));
+        fileStore.current.set(id, file);
       } catch (e) {
         problems.push(`${file.name}: ${e.message}`);
       }
@@ -65,6 +128,8 @@ export default function ReelMaker() {
   function removeAsset(i) {
     setAssets((prev) => {
       URL.revokeObjectURL(prev[i].url);
+      fileStore.current.delete(prev[i].id);
+      delete context.current.transcripts[prev[i].id];
       return prev.filter((_, k) => k !== i);
     });
     setTimeline(null);
@@ -83,26 +148,60 @@ export default function ReelMaker() {
     setBusy('');
   }
 
-  function makeReel() {
-    const { timeline: t, warnings, stats } = planReel({ assets, targetSeconds: target, presetId, beats: music?.beats, title, endText });
-    setTimeline(t);
+  async function makeReel(extra = {}) {
+    setStages({});
+    setBusy(claudeOn ? 'Editing with Claude…' : 'Making your reel…');
     setRender({ status: 'idle' });
-    setNotes([...warnings, ...(stats?.beatSnaps ? [`${stats.beatSnaps} cuts snapped to the beat.`] : [])]);
+    try {
+      const result = await runPipeline(pipelineOpts(extra));
+      setTimeline(result.timeline);
+      setNotes(result.notes);
+      if (extra.revision) setRevision('');
+    } catch (e) {
+      setNotes([e.message]);
+    }
+    setBusy('');
+    if (status?.configured) refreshUsage();
+  }
+
+  // Rebuild after a manual edit, keeping caption and mix choices, then redo captions, mix and QC.
+  function rebuild(shots, overrides = {}) {
+    const next = buildTimeline({
+      shots, presetId: timeline.presetId, title: timeline.title?.text, endText: timeline.endCard?.text,
+      captionStyle: overrides.captionStyle ?? timeline.captionStyle, audio: overrides.audio ?? timeline.audio,
+    });
+    const done = finishTimeline(next, { assets, music, transcripts: context.current.transcripts, targetSeconds: target, onStage: markStage });
+    setTimeline(done.timeline);
+    return done;
   }
 
   function editShots(mutator) {
     const shots = timeline.shots.map((s) => ({ ...s }));
     mutator(shots);
     const { shots: clean, warnings } = normalizeShots(shots, assets);
-    setTimeline(buildTimeline({ shots: clean, presetId: timeline.presetId, title: timeline.title?.text, endText: timeline.endCard?.text }));
+    rebuild(clean);
     if (warnings.length) setNotes(warnings);
   }
 
   function fitLength() {
     const shots = timeline.shots.map((s) => ({ ...s }));
     const short = reconcile(shots, assets, target * FPS);
-    setTimeline(buildTimeline({ shots, presetId: timeline.presetId, title: timeline.title?.text, endText: timeline.endCard?.text }));
+    rebuild(shots);
     setNotes(short > 0 ? [`Not enough footage to reach ${target} s.`] : [`Fitted to ${target} s.`]);
+  }
+
+  async function redoSection(sectionId) {
+    setBusy(`Claude is re-cutting the ${sectionId}…`);
+    try {
+      const result = await regenerateSection(pipelineOpts(), timeline, sectionId, sectionAsk[sectionId] || '');
+      setTimeline(result.timeline);
+      setNotes([`Re-cut the ${sectionId}.`, ...result.notes]);
+      setSectionAsk((p) => ({ ...p, [sectionId]: '' }));
+    } catch (e) {
+      setNotes([`Couldn't re-cut the ${sectionId}: ${e.message}`]);
+    }
+    setBusy('');
+    refreshUsage();
   }
 
   async function shareForClaude() {
@@ -131,7 +230,7 @@ export default function ReelMaker() {
   function applyReply() {
     try {
       const { timeline: t, warnings } = parsePlan(reply, { assets, targetSeconds: target, presetId });
-      setTimeline(t);
+      setTimeline(finishTimeline(t, { assets, music, transcripts: context.current.transcripts, targetSeconds: target, onStage: markStage }).timeline);
       setRender({ status: 'idle' });
       setNotes(['Applied Claude’s plan.', ...warnings]);
     } catch (e) {
@@ -150,6 +249,7 @@ export default function ReelMaker() {
     let wake = null;
     try { wake = await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
     setRender({ status: 'rendering', progress: 0 });
+    markStage('render', 'running');
     try {
       const { getBlob } = await renderMediaOnWeb({
         composition: { id: REEL_ID, component: Reel, durationInFrames: timeline.durationInFrames, fps: FPS, width: WIDTH, height: HEIGHT },
@@ -161,9 +261,18 @@ export default function ReelMaker() {
         onProgress: ({ progress, renderEstimatedTime }) => setRender({ status: 'rendering', progress, eta: renderEstimatedTime }),
       });
       const blob = await getBlob();
-      setRender({ status: 'done', blob, url: URL.createObjectURL(blob) });
+      const url = URL.createObjectURL(blob);
+      setRender({ status: 'done', blob, url });
+      markStage('render', 'done', `${(blob.size / 1e6).toFixed(1)} MB MP4`);
+      // Post-render QC: the file must be exactly as long as the timeline.
+      const check = checkRenderedDuration(await videoDuration(url), timeline.durationInFrames);
+      markStage('qc', check.ok ? 'done' : 'error', check.ok
+        ? `MP4 is ${check.actual.toFixed(2)} s as planned`
+        : `MP4 length ${Number.isFinite(check.actual) ? check.actual.toFixed(2) : 'unknown'} s, expected ${check.expected.toFixed(2)} s`);
     } catch (e) {
-      setRender(abort.current.signal.aborted ? { status: 'idle' } : { status: 'error', error: e.message });
+      const aborted = abort.current.signal.aborted;
+      setRender(aborted ? { status: 'idle' } : { status: 'error', error: e.message });
+      markStage('render', aborted ? 'pending' : 'error', aborted ? 'cancelled' : e.message);
     } finally {
       wake?.release?.();
     }
@@ -187,7 +296,7 @@ export default function ReelMaker() {
     <main className="app">
       <header className="top">
         <h1>Reel Edits</h1>
-        <p>Clips and photos in, a polished 1–2 minute reel out. Everything runs on your phone.</p>
+        <p>Clips and photos in, a polished 1–2 minute reel out. Claude plans the edit; the video renders on your phone.</p>
       </header>
 
       <section className="card">
@@ -229,6 +338,8 @@ export default function ReelMaker() {
         <p className="hint">Tip: skip this and add a trending sound in Instagram or TikTok when you post. That avoids music licensing.</p>
       </section>
 
+      <AiPanel api={api} settings={settings} setSettings={setSettings} status={status} setStatus={setStatus} usage={usage} refreshUsage={refreshUsage} projectId={projectId} />
+
       <section className="card">
         <h2><span>3</span> Style</h2>
         <div className="chips">
@@ -245,13 +356,20 @@ export default function ReelMaker() {
         </label>
         <label className="field">Hook text <input value={title} maxLength={60} placeholder="e.g. 48 hours in Zanzibar" onChange={(e) => setTitle(e.target.value)} /></label>
         <label className="field">Ending text <input value={endText} maxLength={60} placeholder="e.g. Follow for part 2" onChange={(e) => setEndText(e.target.value)} /></label>
-        <button className="primary" disabled={!assets.length || !!busy} onClick={makeReel}>Make my reel</button>
+        <label className="field">What is the reel about? <textarea rows={2} value={brief} maxLength={1000} placeholder="e.g. Launch event for our new product. Hook on the reveal, end on the crowd." onChange={(e) => setBrief(e.target.value)} /></label>
+        <button className="primary" disabled={!assets.length || !!busy} onClick={() => makeReel()}>{claudeOn ? 'Make my reel with Claude' : 'Make my reel'}</button>
+        {Object.keys(stages).length > 0 && (
+          <ol className="stages">
+            {STAGES.map((st) => {
+              const cur = stages[st.id];
+              return <li key={st.id} className={cur?.status || 'waiting'}><b>{st.label}</b>{cur?.note ? <small>{cur.note}</small> : null}</li>;
+            })}
+          </ol>
+        )}
       </section>
 
-      <section className="card">
-        <h2><span>✦</span> Plan with Claude <em>optional</em></h2>
-        <p className="hint">Uses the Claude app you already pay for. No API key or extra cost.</p>
-        <label className="field">What is the reel about? <input value={brief} placeholder="e.g. Launch event for our new product" onChange={(e) => setBrief(e.target.value)} /></label>
+      <details className="card manual">
+        <summary>Plan in the Claude app instead (copy and paste, no API key)</summary>
         <ol className="steps">
           <li><button className="secondary-btn" disabled={!assets.length || !!busy} onClick={shareForClaude}>Share footage sheet + prompt to Claude</button></li>
           <li>Paste Claude&apos;s reply here:
@@ -259,7 +377,7 @@ export default function ReelMaker() {
           </li>
           <li><button className="secondary-btn" disabled={!reply.trim() || !assets.length} onClick={applyReply}>Apply Claude&apos;s plan</button></li>
         </ol>
-      </section>
+      </details>
 
       {busy && <p className="busy">{busy}</p>}
       {notes.length > 0 && <ul className="notes">{notes.map((n, i) => <li key={i}>{n}</li>)}</ul>}
@@ -281,6 +399,35 @@ export default function ReelMaker() {
             />
           </div>
 
+          {claudeOn && (
+            <div className="revise">
+              <label className="field">Ask Claude for changes
+                <input value={revision} maxLength={500} placeholder="e.g. Faster hook, end on the sunset, fewer flashes" onChange={(e) => setRevision(e.target.value)} />
+              </label>
+              <button className="secondary-btn" disabled={!revision.trim() || !!busy} onClick={() => makeReel({ revision, currentTimeline: timeline })}>Revise the edit</button>
+            </div>
+          )}
+
+          <label className="field">Captions
+            <select value={timeline.captionStyle?.style || 'none'} onChange={(e) => rebuild(timeline.shots, { captionStyle: { ...timeline.captionStyle, style: e.target.value } })}>
+              {Object.entries(CAPTION_STYLES).map(([id, c]) => <option key={id} value={id}>{c.label}</option>)}
+            </select>
+          </label>
+          {timeline.captionStyle?.style !== 'none' && !timeline.captions?.length && <p className="hint">Captions appear when transcription is on and clips contain speech.</p>}
+
+          {claudeOn && sectionsOf(timeline).length > 1 && (
+            <details className="sections">
+              <summary>Re-cut one section with Claude</summary>
+              {sectionsOf(timeline).map((sec) => (
+                <div key={sec.id} className="section-row">
+                  <b>{sec.id}</b> <small>{secs(sec.frames)} s · {sec.indices.length} shots</small>
+                  <input value={sectionAsk[sec.id] || ''} maxLength={300} placeholder="What should change?" onChange={(e) => setSectionAsk((p) => ({ ...p, [sec.id]: e.target.value }))} />
+                  <button className="secondary-btn" disabled={!!busy} onClick={() => redoSection(sec.id)}>Re-cut</button>
+                </div>
+              ))}
+            </details>
+          )}
+
           <details className="shots">
             <summary>Edit shots</summary>
             {Math.abs(timeline.durationInFrames - target * FPS) > 2 && (
@@ -292,7 +439,7 @@ export default function ReelMaker() {
                   <img src={assetMap[s.assetId]?.thumb} alt="" />
                   <div className="shot-body">
                     <div className="shot-head">
-                      <b>{s.assetId}</b>
+                      <b>{s.assetId}{s.section ? <small> · {s.section}</small> : null}</b>
                       <span>
                         <button onClick={() => editShots((x) => { x[i].frames -= 8; })}>−</button>
                         {secs(s.frames)} s

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A phone-first Next.js app that turns short clips and photos into polished 60\u2013120 second vertical reels, rendered in the browser.",
+  "description": "A phone-first Next.js app that turns short clips and photos into polished 60–120 second vertical reels, rendered in the browser.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -20,6 +20,7 @@
     "test:e2e": "node tests/e2e-render.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.14.0",
     "@remotion/fonts": "4.0.541",
     "@remotion/media": "4.0.541",
     "@remotion/player": "4.0.541",

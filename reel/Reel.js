@@ -8,7 +8,9 @@ import { Video, Audio } from '@remotion/media';
 import { TransitionSeries, linearTiming } from '@remotion/transitions';
 import { loadFont } from '@remotion/fonts';
 import { presentationFor, hasPresentation } from './presentations.js';
-import { transitionFrames } from '../lib/planner.js';
+import { Captions } from './Captions.js';
+import { transitionFrames, shotStarts } from '../lib/planner.js';
+import { gainAt } from '../lib/audioMix.js';
 import { PRESETS } from '../lib/presets.js';
 
 // Bundled with the app (public/fonts, SIL OFL) so titles look the same offline and in the export.
@@ -42,11 +44,13 @@ function effectTransform(effect, frame, duration, index) {
   }
 }
 
-function Shot({ shot, asset, index, clipVolume }) {
+// clipGain: a constant, or (outputFrame) => gain from the mix keyframes.
+function Shot({ shot, asset, index, clipGain, start }) {
   const frame = useCurrentFrame();
   const transform = effectTransform(shot.effect, frame, shot.frames, index);
+  const volume = typeof clipGain === 'function' ? (f) => clipGain(start + f) : clipGain;
   const media = asset.kind === 'video'
-    ? h(Video, { src: asset.url, trimBefore: shot.from, volume: clipVolume, muted: clipVolume === 0, objectFit: 'cover', style: videoFill })
+    ? h(Video, { src: asset.url, trimBefore: shot.from, volume, muted: clipGain === 0, objectFit: 'cover', style: videoFill })
     : h(Img, { src: asset.url, style: fill });
   return h(AbsoluteFill, { style: { backgroundColor: '#000', overflow: 'hidden' } },
     h(AbsoluteFill, { style: { transform } }, media));
@@ -86,13 +90,16 @@ export function Reel({ timeline, assets, music }) {
   const { durationInFrames, fps } = useVideoConfig();
   if (!timeline?.shots?.length) return h(AbsoluteFill, { style: { backgroundColor: '#000' } });
   const preset = PRESETS[timeline.presetId] ?? PRESETS.hype;
-  const clipVolume = music ? preset.clipVolumeWithMusic : 1;
+  // Mix keyframes come from lib/audioMix.js (music ducks under speech); older timelines use preset levels.
+  const mix = timeline.mix;
+  const clipGain = mix?.clip ? (f) => gainAt(mix.clip, f) : music ? preset.clipVolumeWithMusic : 1;
+  const starts = shotStarts(timeline.shots);
   const series = [];
   timeline.shots.forEach((shot, i) => {
     const asset = assets[shot.assetId];
     if (!asset) return;
     series.push(h(TransitionSeries.Sequence, { key: `s${i}`, durationInFrames: shot.frames, premountFor: 15 },
-      h(Shot, { shot, asset, index: i, clipVolume })));
+      h(Shot, { shot, asset, index: i, clipGain, start: starts[i] })));
     const next = timeline.shots[i + 1];
     const overlap = next ? transitionFrames(shot.transition, shot, next) : 0;
     if (next && overlap > 0 && hasPresentation(shot.transition)) {
@@ -102,11 +109,14 @@ export function Reel({ timeline, assets, music }) {
   const fadeOut = Math.min(durationInFrames, Math.round(1.5 * fps));
   return h(AbsoluteFill, { style: { backgroundColor: '#000' } },
     h(TransitionSeries, null, series),
+    h(Captions, { captions: timeline.captions, captionStyle: timeline.captionStyle, fontFamily }),
     timeline.title?.text ? h(Sequence, { durationInFrames: timeline.title.frames }, h(TextCard, { text: timeline.title.text, y: 520, frames: timeline.title.frames })) : null,
     timeline.endCard?.text ? h(Sequence, { from: Math.max(0, durationInFrames - timeline.endCard.frames) }, h(TextCard, { text: timeline.endCard.text, y: 900, size: 84, frames: timeline.endCard.frames + 6 })) : null,
     music ? h(Audio, {
       src: music.url, loop: true,
-      volume: (f) => preset.musicVolume * interpolate(f, [0, 6, durationInFrames - fadeOut, durationInFrames], [0, 1, 1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }),
+      volume: mix?.music
+        ? (f) => gainAt(mix.music, f)
+        : (f) => preset.musicVolume * interpolate(f, [0, 6, durationInFrames - fadeOut, durationInFrames], [0, 1, 1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }),
     }) : null);
 }
 

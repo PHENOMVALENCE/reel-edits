@@ -114,3 +114,41 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 progress { width: 100%; height: 12px; accent-color: var(--accent); }
 .result { width: 100%; max-width: 360px; display: block; margin: 0 auto; border-radius: 12px; background: #000; }
+
+/* Claude panel, pipeline stages and usage dashboard */
+.card h2 em.status.ok { color: #6fdc8c; }
+.card h2 em.status.warn { color: var(--accent-2); }
+.card h2 em.status.bad { color: #ff8f7a; }
+.card h2 em.status.off { color: var(--muted); }
+.ai-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+.ai-row .secondary-btn { width: auto; margin: 0; }
+.switch { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 14px; color: var(--muted); }
+.switch input { accent-color: var(--accent); width: 18px; height: 18px; }
+code { font-size: 13px; background: #26242f; padding: 1px 5px; border-radius: 6px; }
+.stages { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 4px; font-size: 14px; }
+.stages li { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; border-radius: 8px; background: #1f1e27; color: var(--muted); }
+.stages li::before { content: '○'; width: 14px; flex: none; }
+.stages li b { font-weight: 600; }
+.stages li small { margin-left: auto; text-align: right; }
+.stages li.running { color: var(--accent-2); }
+.stages li.running::before { content: '◐'; }
+.stages li.done { color: var(--text); }
+.stages li.done::before { content: '✓'; color: #6fdc8c; }
+.stages li.fallback::before, .stages li.skipped::before { content: '–'; }
+.stages li.error { color: #ff8f7a; }
+.stages li.error::before { content: '!'; }
+.stages li.pending::before { content: '…'; }
+.usage { margin-top: 14px; }
+.usage summary, .sections summary, .manual summary { cursor: pointer; font-weight: 600; padding: 6px 0; font-size: 14px; }
+.usage progress, .card progress { width: 100%; margin-top: 10px; accent-color: var(--accent); }
+.usage-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+.usage-table th, .usage-table td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+.usage-table th { color: var(--muted); font-weight: 500; }
+.usage-table tr.total td { font-weight: 700; border-bottom: 0; }
+.budget-form .secondary-btn { margin-top: 12px; }
+.revise .secondary-btn, .sections .secondary-btn { margin-top: 8px; }
+.sections { margin-top: 14px; }
+.section-row { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.section-row small { color: var(--muted); text-align: right; }
+.section-row input { grid-column: 1 / -1; margin: 0; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: #0f0e14; }
+.section-row .secondary-btn { grid-column: 1 / -1; margin-top: 0; }

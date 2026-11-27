@@ -45,7 +45,10 @@ function clickTrack(bpm, seconds, sr = 22050) {
   for (let t = 0.3 * sr; t < samples.length; t += step) {
     for (let i = 0; i < 400; i++) samples[Math.floor(t) + i] = Math.sin(i / 3) * Math.exp(-i / 80);
   }
-  for (let i = 0; i < samples.length; i++) samples[i] += (Math.random() - 0.5) * 0.01;
+  // Seeded noise so the test is deterministic.
+  let seed = 12345;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32);
+  for (let i = 0; i < samples.length; i++) samples[i] += (rand() - 0.5) * 0.01;
   return samples;
 }
 
